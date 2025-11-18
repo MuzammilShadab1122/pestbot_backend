@@ -1,0 +1,13 @@
+# Virtual environment and cache
+venv/
+__pycache__/
+
+# Data and private files
+data/
+config/groq_key.txt
+
+# System / OS files
+*.pyc
+*.pyo
+.DS_Store
+.env
