@@ -1,11 +1,10 @@
-# main.py
 # ===============================================================
 #       FASTAPI BACKEND FOR ANDROID APP — PEST BOT AI
 #   Features:
-#     ✔ Chat (Mixtral-8x7B)
-#     ✔ Image Analysis (Improved Prompt)
+#     ✔ Chat (LLaMA 3.1)
+#     ✔ Image Analysis
 #     ✔ Voice Input
-#     ✔ RAG Dataset Support (CSV or TXT)
+#     ✔ RAG Dataset Support (CSV / TXT)
 # ===============================================================
 
 import base64
@@ -22,17 +21,21 @@ import speech_recognition as sr
 # ============================================================
 #                    LOAD GROQ API KEY
 # ============================================================
-try:
-    with open("config/groq_key.txt", "r") as f:
-        GROQ_API_KEY = f.read().strip()
-except FileNotFoundError:
-    raise FileNotFoundError("Groq API key not found in config/groq_key.txt")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-GROQ_MODEL = "llama-3.1-8b-instant"   # Verified working model
+if not GROQ_API_KEY:
+    try:
+        with open("config/groq_key.txt", "r") as f:
+            GROQ_API_KEY = f.read().strip()
+    except FileNotFoundError:
+        raise ValueError(
+            "Groq API key not found. Please set GROQ_API_KEY in Render environment or add config/groq_key.txt locally."
+        )
 
+GROQ_MODEL = "llama-3.1-8b-instant"
 
 # ============================================================
-#                   PEST BOT SYSTEM PROMPT
+#                  PEST BOT SYSTEM PROMPT
 # ============================================================
 PESTBOT_SYSTEM_PROMPT = """
 You are Pest Bot, an advanced AI expert specializing in identifying 
@@ -47,7 +50,6 @@ Your responsibilities:
 - Always answer clearly, professionally, and practically
 """
 
-
 # ============================================================
 #           LOAD ALL DATASETS FROM backend/data/
 # ============================================================
@@ -57,13 +59,14 @@ RAG_KB = []
 if os.path.exists(DATA_FOLDER):
     for file in os.listdir(DATA_FOLDER):
         try:
+            path = os.path.join(DATA_FOLDER, file)
             if file.endswith(".csv"):
-                with open(os.path.join(DATA_FOLDER, file), encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     reader = csv.reader(f)
                     for row in reader:
                         RAG_KB.append(" ".join(row))
             elif file.endswith(".txt"):
-                with open(os.path.join(DATA_FOLDER, file), encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     for line in f:
                         if line.strip():
                             RAG_KB.append(line.strip())
@@ -127,23 +130,17 @@ app.add_middleware(
 
 
 # ============================================================
-#                    CHAT ENDPOINT (JSON)
+#                    CHAT ENDPOINT
 # ============================================================
-class ChatRequest(BaseModel):
-    prompt: str
-
-
 @app.post("/chat")
-async def chat(message: str = Form(...)):
+async def chat(prompt: str = Form(...)):
     try:
-        rag = retrieve_relevant_chunks(message)
-        answer = ask_groq(PESTBOT_SYSTEM_PROMPT, message, rag_context=rag)
+        rag = retrieve_relevant_chunks(prompt)
+        answer = ask_groq(PESTBOT_SYSTEM_PROMPT, prompt, rag_context=rag)
         return {"reply": answer}
     except Exception as e:
-        # Log and return safe error
         print("[Chat Error]", e)
         return {"reply": f"Server error: {str(e)}"}
-
 
 
 # ============================================================
@@ -190,3 +187,11 @@ async def voice_chat(file: UploadFile = File(...)):
     rag = retrieve_relevant_chunks(text)
     answer = ask_groq(PESTBOT_SYSTEM_PROMPT, text, rag_context=rag)
     return {"transcript": text, "response": answer}
+
+
+# ============================================================
+#                    ENTRY POINT
+# ============================================================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
