@@ -1,19 +1,19 @@
 # ===============================================================
-# PEST BOT — FastAPI Backend
+# PEST BOT — FastAPI Backend (Production Safe)
 # ===============================================================
 # ✅ Features:
 # - Chat (Groq + Llama 3.1)
 # - Image-based pest analysis
 # - Voice input support
 # - RAG from local CSV/TXT files
-# ✅ Fully compatible with Render deployment
+# ✅ Fully compatible with Render & Flutter
 # ===============================================================
 
 import os
 import io
 import base64
 import csv
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from groq import Groq
@@ -21,36 +21,33 @@ from PIL import Image
 import speech_recognition as sr
 
 # ============================================================
-# LOAD GROQ API KEY (Render ENV Safe)
+# 1. LOAD GROQ API KEY (ENVIRONMENT + LOCAL FALLBACK)
 # ============================================================
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 if not GROQ_API_KEY:
     try:
-        # fallback if file exists locally (for local testing)
         with open("config/groq_key.txt", "r") as f:
             GROQ_API_KEY = f.read().strip()
     except FileNotFoundError:
-        raise RuntimeError("❌ GROQ_API_KEY not found — set it in Render environment variables!")
+        raise RuntimeError("❌ GROQ_API_KEY not found — please add it in Render environment variables.")
 
+# Initialize Groq client
 client = Groq(api_key=GROQ_API_KEY)
 GROQ_MODEL = "llama-3.1-8b-instant"
 
-
 # ============================================================
-# PEST BOT SYSTEM PROMPT
+# 2. SYSTEM PROMPT
 # ============================================================
 PESTBOT_SYSTEM_PROMPT = """
 You are Pest Bot, an advanced agricultural AI assistant.
 You can identify pests and diseases from text, voice, or images,
-and provide chemical + organic treatment and prevention guidance.
-
-Always answer clearly, practically, and based on your knowledge.
+and provide chemical and organic treatment and prevention guidance.
+Always answer clearly, practically, and based on scientific context.
 """
 
-
 # ============================================================
-# LOAD LOCAL RAG DATA (OPTIONAL)
+# 3. LOAD LOCAL RAG DATA (OPTIONAL)
 # ============================================================
 RAG_KB = []
 DATA_FOLDER = "data"
@@ -75,7 +72,7 @@ else:
 
 
 def retrieve_relevant_chunks(query, limit=5):
-    """Simple keyword search in RAG KB."""
+    """Simple keyword-based retrieval from local RAG KB."""
     q = query.lower()
     results = []
     for line in RAG_KB:
@@ -87,14 +84,16 @@ def retrieve_relevant_chunks(query, limit=5):
 
 
 # ============================================================
-# GROQ CHAT FUNCTION
+# 4. GROQ API HANDLER
 # ============================================================
 def ask_groq(system_prompt, user_input, rag_context=""):
+    """Send user input to Groq API and get AI response."""
     final_prompt = (
         f"User Question:\n{user_input}\n\n"
-        f"Dataset Information:\n{rag_context}\n\n"
+        f"Dataset Context:\n{rag_context}\n\n"
         "Answer as Pest Bot:"
     )
+
     try:
         response = client.chat.completions.create(
             model=GROQ_MODEL,
@@ -103,16 +102,16 @@ def ask_groq(system_prompt, user_input, rag_context=""):
                 {"role": "user", "content": final_prompt},
             ],
         )
-        return response.choices[0].message.content
+        return response.choices[0].message.content.strip()
     except Exception as e:
         print(f"[Groq API Error] {e}")
         raise HTTPException(status_code=500, detail=f"Groq API error: {e}")
 
 
 # ============================================================
-# FASTAPI APP CONFIG
+# 5. FASTAPI APP CONFIG
 # ============================================================
-app = FastAPI(title="Pest Bot API")
+app = FastAPI(title="Pest Bot API", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -123,28 +122,46 @@ app.add_middleware(
 
 
 # ============================================================
-# ENDPOINT: CHAT
+# 6. CHAT ENDPOINT (UNIVERSAL FIX FOR 422 ERROR)
 # ============================================================
-class ChatRequest(BaseModel):
-    prompt: str
-
-
 @app.post("/chat")
-async def chat(prompt: str = Form(...)):
+async def chat(request: Request):
+    """
+    Accepts message as:
+    - application/x-www-form-urlencoded
+    - multipart/form-data
+    - raw JSON { "message": "..." }
+    ✅ Prevents 422 error
+    """
     try:
-        rag_context = retrieve_relevant_chunks(prompt)
-        answer = ask_groq(PESTBOT_SYSTEM_PROMPT, prompt, rag_context)
+        content_type = request.headers.get("Content-Type", "")
+        message = None
+
+        if "application/json" in content_type:
+            data = await request.json()
+            message = data.get("message") or data.get("prompt")
+        elif "form" in content_type:
+            form = await request.form()
+            message = form.get("message") or form.get("prompt")
+
+        if not message:
+            raise HTTPException(status_code=400, detail="No message provided.")
+
+        rag = retrieve_relevant_chunks(message)
+        answer = ask_groq(PESTBOT_SYSTEM_PROMPT, message, rag_context=rag)
         return {"reply": answer}
+
     except Exception as e:
         print(f"[Chat Error] {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 # ============================================================
-# ENDPOINT: IMAGE
+# 7. IMAGE ANALYSIS
 # ============================================================
 @app.post("/image")
 async def analyze_image(file: UploadFile = File(...)):
+    """Accepts an image and analyzes pest or disease."""
     try:
         img = Image.open(file.file)
         buf = io.BytesIO()
@@ -158,20 +175,21 @@ Analyze this crop image (base64 encoded). Provide:
 1. Pest or disease name
 2. Severity
 3. Likely cause
-4. Chemical + organic treatment
+4. Chemical and organic treatment
 5. Prevention advice
 
-IMAGE_DATA: {encoded[:200]}... (truncated)
+IMAGE_DATA (truncated): {encoded[:300]}
 """
     answer = ask_groq(PESTBOT_SYSTEM_PROMPT, prompt)
     return {"response": answer}
 
 
 # ============================================================
-# ENDPOINT: VOICE
+# 8. VOICE RECOGNITION
 # ============================================================
 @app.post("/voice")
 async def voice_chat(file: UploadFile = File(...)):
+    """Converts audio to text and responds intelligently."""
     try:
         audio_bytes = await file.read()
         recognizer = sr.Recognizer()
@@ -187,7 +205,15 @@ async def voice_chat(file: UploadFile = File(...)):
 
 
 # ============================================================
-# ENTRY POINT (Render Auto-detect Safe)
+# 9. ROOT ROUTE (OPTIONAL)
+# ============================================================
+@app.get("/")
+async def root():
+    return {"status": "✅ Pest Bot API is running successfully."}
+
+
+# ============================================================
+# 10. ENTRY POINT (Render Auto-Detect Safe)
 # ============================================================
 if __name__ == "__main__":
     import uvicorn
